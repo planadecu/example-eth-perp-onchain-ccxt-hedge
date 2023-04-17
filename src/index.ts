@@ -71,38 +71,49 @@ async function getTopOfTheBookDepth() {
       // Filter out all perpetual contracts between ETH and USD
       if ( base.includes(market.base) && quote.includes(market.quote) && market.contract == true && market.swap == true ) {
 
+        let bidMinPrice = Number.MAX_VALUE, bidDepth = 0, askMaxPrice = Number.MIN_VALUE, askDepth = 0, fundingRate = null
+
         try {
           const orderBook = await exchange.fetchOrderBook(symbol)
           
-          console.log(symbol, '(' + exchange.name + ')')
+         
           if(orderBook.bids && orderBook.bids.length > 0 && orderBook.asks && orderBook.asks.length > 0) {
             
             // calculate bid depth
-            const bidMinPrice = orderBook.bids[0][0] - (orderBook.bids[0][0] * 0.005)
-            const bidDepth = orderBook.bids.reduce((total, bid) => total + ( bid[1] > bidMinPrice ? bid[1] : 0), 0)
-            console.log(' - Bid min price: ', bidMinPrice, 'Units:', bidDepth)
+            bidMinPrice = orderBook.bids[0][0] - (orderBook.bids[0][0] * 0.005)
+            bidDepth = orderBook.bids.reduce((total, bid) => total + ( bid[1] > bidMinPrice ? bid[1] : 0), 0)
 
             // calculate ask depth
-            const askMaxPrice = orderBook.asks[0][0] + (orderBook.asks[0][0] * 0.005)
-            const askDepth = orderBook.asks.reduce((total, ask) => total + ( ask[1] < askMaxPrice ? ask[1] : 0), 0)
-            console.log(' - Ask max price: ', askMaxPrice, 'Units:', askDepth)
+            askMaxPrice = orderBook.asks[0][0] + (orderBook.asks[0][0] * 0.005)
+            askDepth = orderBook.asks.reduce((total, ask) => total + ( ask[1] < askMaxPrice ? ask[1] : 0), 0)
             
-          } else {
-            console.log(' - No bids or asks')
           } 
 
           // Wait for rate limit
           await (ccxt as any).sleep(exchange.rateLimit); // Missing type information.
         } catch (error) {
-          console.log('Error:', error);
+          console.log('Error: could not fetch orderbook', error);
         }
+        
+        try {
+          // PART 4: Get Funding rate
+          fundingRate = (await exchange.fetchFundingRate(symbol)).fundingRate;
+          
+        } catch (error) {
+          fundingRate = NaN
+        }
+
+        console.log(symbol, '(' + exchange.name + ')')
+        console.log(' - Bid min price: ', bidMinPrice, 'Units:', bidDepth)
+        console.log(' - Ask max price: ', askMaxPrice, 'Units:', askDepth)
+        console.log(' - Funding rate: ', fundingRate)
+
       }
     }
   })
 
   console.log('State changed')
 }
-
 
 main().catch(e => {
   console.error(e)

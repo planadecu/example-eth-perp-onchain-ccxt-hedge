@@ -27,8 +27,11 @@ async function main() {
 
     // Has state changed?
     if (oldState !== state) {
-      await getTopOfTheBookDepth();
+      console.log('State changed')
 
+      console.log(await getFutureExchangeInfo())
+
+      console.log('Done')
     }
 
     // Update state
@@ -36,8 +39,18 @@ async function main() {
   })
 }
 
+
 // PART 2 & 3: Fetch the top of book depth for all ETH denominated perpetual contracts both USD margined and COIN margined (express this as order size to impact price by 50bps) using CCXT package
-async function getTopOfTheBookDepth() {
+type FutureExchangeInfo = {
+  symbol: string,
+  bidDepth: number,
+  askDepth: number,
+  fundingRate: number
+}
+
+async function getFutureExchangeInfo(): Promise<FutureExchangeInfo[]> {
+
+  const promises: Promise<FutureExchangeInfo>[] = []
 
   const exchanges = [
     new ccxt.binancecoinm({ 
@@ -60,61 +73,76 @@ async function getTopOfTheBookDepth() {
     })
   ]
 
-  exchanges.forEach(async (exchange) => {
-    
-    exchange.markets = await exchange.loadMarkets(true)
-    for (let symbol in exchange.markets) {
-      const market = exchange.markets[symbol];
-      const base = ["ETH", "WETH"]
-      const quote = ["USD", "USDT", "USDC"]
+  await Promise.all(exchanges.map(async (exchange) => (new Promise<void>(async (resolve) => {
+    try {
+      exchange.markets = await exchange.loadMarkets(true)
+      for (let symbol in exchange.markets) {
+        const market = exchange.markets[symbol];
+        const base = ["ETH", "WETH"]
+        const quote = ["USD", "USDT", "USDC"]
 
-      // Filter out all perpetual contracts between ETH and USD
-      if ( base.includes(market.base) && quote.includes(market.quote) && market.contract == true && market.swap == true ) {
+        // Filter out all perpetual contracts between ETH and USD
+        if ( base.includes(market.base) && quote.includes(market.quote) && market.contract == true && market.swap == true ) {
 
-        let bidMinPrice = Number.MAX_VALUE, bidDepth = 0, askMaxPrice = Number.MIN_VALUE, askDepth = 0, fundingRate = null
+          let bidMinPrice = Number.MAX_VALUE, bidDepth = 0, askMaxPrice = Number.MIN_VALUE, askDepth = 0, fundingRate = null
 
-        try {
-          const orderBook = await exchange.fetchOrderBook(symbol)
-          
-         
-          if(orderBook.bids && orderBook.bids.length > 0 && orderBook.asks && orderBook.asks.length > 0) {
+          promises.push(new Promise(async (resolve) => {
+            try {
+              const orderBook = await exchange.fetchOrderBook(symbol)
+              
             
-            // calculate bid depth
-            bidMinPrice = orderBook.bids[0][0] - (orderBook.bids[0][0] * 0.005)
-            bidDepth = orderBook.bids.reduce((total, bid) => total + ( bid[1] > bidMinPrice ? bid[1] : 0), 0)
+              if(orderBook.bids && orderBook.bids.length > 0 && orderBook.asks && orderBook.asks.length > 0) {
+                
+                // calculate bid depth
+                bidMinPrice = orderBook.bids[0][0] - (orderBook.bids[0][0] * 0.005)
+                bidDepth = orderBook.bids.reduce((total, bid) => total + ( bid[1] > bidMinPrice ? bid[1] : 0), 0)
 
-            // calculate ask depth
-            askMaxPrice = orderBook.asks[0][0] + (orderBook.asks[0][0] * 0.005)
-            askDepth = orderBook.asks.reduce((total, ask) => total + ( ask[1] < askMaxPrice ? ask[1] : 0), 0)
+                // calculate ask depth
+                askMaxPrice = orderBook.asks[0][0] + (orderBook.asks[0][0] * 0.005)
+                askDepth = orderBook.asks.reduce((total, ask) => total + ( ask[1] < askMaxPrice ? ask[1] : 0), 0)
+                
+              } 
+
+              // Wait for rate limit
+              await (ccxt as any).sleep(exchange.rateLimit); // Missing type information.
+            } catch (error) {
+              console.log('Error: could not fetch orderbook', error);
+            }
             
-          } 
+            try {
+              // PART 4: Get Funding rate
+              fundingRate = (await exchange.fetchFundingRate(symbol)).fundingRate;
+              
+            } catch (error) {
+              fundingRate = NaN
+            }
 
-          // Wait for rate limit
-          await (ccxt as any).sleep(exchange.rateLimit); // Missing type information.
-        } catch (error) {
-          console.log('Error: could not fetch orderbook', error);
+            console.log(symbol, '(' + exchange.name + ')')
+            console.log(' - Bid min price: ', bidMinPrice, 'Units:', bidDepth)
+            console.log(' - Ask max price: ', askMaxPrice, 'Units:', askDepth)
+            console.log(' - Funding rate: ', fundingRate)
+
+            resolve({
+              symbol,
+              bidDepth,
+              askDepth,
+              fundingRate
+            })
+          }))
+
         }
-        
-        try {
-          // PART 4: Get Funding rate
-          fundingRate = (await exchange.fetchFundingRate(symbol)).fundingRate;
-          
-        } catch (error) {
-          fundingRate = NaN
-        }
-
-        console.log(symbol, '(' + exchange.name + ')')
-        console.log(' - Bid min price: ', bidMinPrice, 'Units:', bidDepth)
-        console.log(' - Ask max price: ', askMaxPrice, 'Units:', askDepth)
-        console.log(' - Funding rate: ', fundingRate)
-
       }
+    } catch (error) {
+      console.log('Error: could not load markets', error);
     }
-  })
+    resolve()
+  }))))
 
-  console.log('State changed')
+  return Promise.all(promises)
 }
+
 
 main().catch(e => {
   console.error(e)
-});
+})
+

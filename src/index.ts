@@ -42,6 +42,7 @@ async function main() {
 
 // PART 2 & 3: Fetch the top of book depth for all ETH denominated perpetual contracts both USD margined and COIN margined (express this as order size to impact price by 50bps) using CCXT package
 type FutureExchangeInfo = {
+  exchange: string,
   symbol: string,
   bidDepth: number,
   askDepth: number,
@@ -95,11 +96,11 @@ async function getFutureExchangeInfo(): Promise<FutureExchangeInfo[]> {
                 
                 // calculate bid depth
                 bidMinPrice = orderBook.bids[0][0] - (orderBook.bids[0][0] * 0.005)
-                bidDepth = orderBook.bids.reduce((total, bid) => total + ( bid[1] > bidMinPrice ? bid[1] : 0), 0)
+                bidDepth = orderBook.bids.reduce((total, bid) => total + ( bid[0] > bidMinPrice ? bid[1] : 0), 0)
 
                 // calculate ask depth
                 askMaxPrice = orderBook.asks[0][0] + (orderBook.asks[0][0] * 0.005)
-                askDepth = orderBook.asks.reduce((total, ask) => total + ( ask[1] < askMaxPrice ? ask[1] : 0), 0)
+                askDepth = orderBook.asks.reduce((total, ask) => total + ( ask[0] < askMaxPrice ? ask[1] : 0), 0)
                 
               } 
 
@@ -123,6 +124,7 @@ async function getFutureExchangeInfo(): Promise<FutureExchangeInfo[]> {
             console.log(' - Funding rate: ', fundingRate)
 
             resolve({
+              exchange: exchange.name,
               symbol,
               bidDepth,
               askDepth,
@@ -141,8 +143,6 @@ async function getFutureExchangeInfo(): Promise<FutureExchangeInfo[]> {
   return Promise.all(promises)
 }
 
-
 main().catch(e => {
   console.error(e)
 })
-

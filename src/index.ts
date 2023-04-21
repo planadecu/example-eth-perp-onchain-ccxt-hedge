@@ -38,12 +38,35 @@ async function main() {
       // });
 
       // Getting optimal trade for 100ETH assuming will be holding a short position for 2 days with a stable funding rate
-      const info = getOptimalExchange(100, 'short', 2, futureExchangeInfo!)
+      const amount = 100
+      const info = getOptimalExchange(amount, 'short', 2, futureExchangeInfo!)
       // print trade info
       console.log('Optimal trade:', info.pair.symbol, '(' + info.pair.exchange + ')')
       console.log(' - Taker Fee:', info.pair.takerFee)
       console.log(' - Funding rate:', info.pair.fundingRate)
       console.log(' - Total Cost:', info.price)
+      console.log(' - Set limit order:', info.limitOrder)
+
+      // PART 6: Post write instruction to onchain address to send 100 of ETH
+      console.log('Sending transaction to the smart contract')
+      try {
+        const tx = await uniswapV2RouterContract.swapETHForExactTokens(100, wstEthAddress, usdcAddress, info.price)
+        // Wait for transaction to be mined
+        console.log('Waiting for transaction to be mined...')
+        if(tx) await provider.waitForTransaction(tx.txHash)
+        console.log('Transaction mined')
+
+        // PART 7: Post order on exchange(s) to execute hedge
+        try {
+          const order = await exchanges.find(exchange => exchange.id == info.pair.exchange)?.createOrder(info.pair.symbol, 'limit', 'sell', amount, info.limitOrder, { 'timeInForce': 'GTC' })
+          console.log('Order created:', order)
+        } catch (error) {
+          console.log('Error: could not create order')
+        }
+
+      } catch (error) {
+        console.log('TX failed: not enough gas to send transaction')
+      }
 
       console.log('Done')
     }
@@ -65,30 +88,30 @@ type FutureExchangeInfo = {
   takerFee: number | undefined
 }
 
+const exchanges = [
+  new ccxt.binancecoinm({ 
+    enableRateLimit: true
+  }), 
+  new ccxt.binance({ 
+    enableRateLimit: true
+  }),
+  new ccxt.binanceusdm({ 
+    enableRateLimit: true
+  }), 
+  new ccxt.okx({ 
+    enableRateLimit: true
+  }),
+  new ccxt.bybit({ 
+    enableRateLimit: true
+  }),
+  new ccxt.deribit({ 
+    enableRateLimit: true
+  })
+]
+
 async function getFutureExchangeInfo(): Promise<FutureExchangeInfo[]> {
 
   const promises: Promise<FutureExchangeInfo>[] = []
-
-  const exchanges = [
-    new ccxt.binancecoinm({ 
-      enableRateLimit: true
-    }), 
-    new ccxt.binance({ 
-      enableRateLimit: true
-    }),
-    new ccxt.binanceusdm({ 
-      enableRateLimit: true
-    }), 
-    new ccxt.okx({ 
-      enableRateLimit: true
-    }),
-    new ccxt.bybit({ 
-      enableRateLimit: true
-    }),
-    new ccxt.deribit({ 
-      enableRateLimit: true
-    })
-  ]
 
   await Promise.all(exchanges.map(async (exchange) => (new Promise<void>(async (resolve) => {
     try {
@@ -159,23 +182,23 @@ async function getFutureExchangeInfo(): Promise<FutureExchangeInfo[]> {
 }
 
 // PART 5: Create logic to decide where to deploy collateral to optimize for: order execution [fees, orderbook impact, funding rate, other]
-function getOptimalExchange(amount: number, direction: 'short' | 'long', hodlDaysForecast: number, exchangeInfo: FutureExchangeInfo[]): {price: number, pair: FutureExchangeInfo} {
+function getOptimalExchange(amount: number, direction: 'short' | 'long', hodlDaysForecast: number, exchangeInfo: FutureExchangeInfo[]): {price: number, limitOrder: number, pair: FutureExchangeInfo} {
   return exchangeInfo.map(pair => { 
       // calculate the filled price ofthe amount in USD from the orderbook
       let price = Number.MAX_VALUE
-      const filledPrice = pair.orderBook!.asks.reduce(([price, paid], ask) => {
+      const filledPrice = pair.orderBook!.asks.reduce(([price, limitOrder, paid], ask) => {
         if (paid < amount) {
-          if(ask[1]>amount-paid) {
-            return [price + (amount-paid) * ask[0], amount]
+          if(ask[1] > amount-paid) {
+            return [price + (amount-paid) * ask[0], ask[0], amount]
           } else {
-            return [price + ask[1] * ask[0], paid + ask[1]]
+            return [price + ask[1] * ask[0], ask[0], paid + ask[1]]
           }
         } else {
-          return [price, paid]
+          return [price, limitOrder, paid]
         }
-      }, [0, 0])
+      }, [0, 0, 0])
       
-      if(filledPrice[1] < amount) {
+      if(filledPrice[2] < amount) {
         console.log('Not enough liquidity for', amount, 'ETH ->', pair.symbol, '(' + pair.exchange + ')')
       } else {
         price = filledPrice[0]
@@ -195,7 +218,7 @@ function getOptimalExchange(amount: number, direction: 'short' | 'long', hodlDay
         price *= 1 + pair.fundingRate
       } 
 
-      return {price, pair}
+      return {price, limitOrder: filledPrice[1], pair}
   }).sort((a, b) => a.price - b.price)[0]
 }
 

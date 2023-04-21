@@ -1,10 +1,9 @@
 import * as dotenv from 'dotenv'
-import { ethers, WebSocketProvider, Contract, ContractEventName } from 'ethers'
+import { WebSocketProvider, Contract } from 'ethers'
 import * as ccxt from 'ccxt'
 
 
 // Read environment variables from .env file
-
 dotenv.config()
 
 const ethereumWSClient = process.env.ETHEREUM_WS_CLIENT!
@@ -27,9 +26,24 @@ async function main() {
 
     // Has state changed?
     if (oldState !== state) {
-      console.log('State changed')
+      console.log('State changed from smart contract')
 
-      console.log(await getFutureExchangeInfo())
+      const futureExchangeInfo = await getFutureExchangeInfo()
+
+      // futureExchangeInfo.forEach(pair => {
+      //   console.log(pair.symbol, '(' + pair.exchange + ')')
+      //   console.log(' - Bid depth:', pair.bidDepth)
+      //   console.log(' - Ask depth:', pair.askDepth)
+      //   console.log(' - Funding rate:', pair.fundingRate)
+      // });
+
+      // Getting optimal trade for 100ETH assuming will be holding a short position for 2 days with a stable funding rate
+      const info = getOptimalExchange(100, 'short', 2, futureExchangeInfo!)
+      // print trade info
+      console.log('Optimal trade:', info.pair.symbol, '(' + info.pair.exchange + ')')
+      console.log(' - Taker Fee:', info.pair.takerFee)
+      console.log(' - Funding rate:', info.pair.fundingRate)
+      console.log(' - Total Cost:', info.price)
 
       console.log('Done')
     }
@@ -46,7 +60,9 @@ type FutureExchangeInfo = {
   symbol: string,
   bidDepth: number,
   askDepth: number,
-  fundingRate: number
+  fundingRate: number,
+  orderBook: ccxt.OrderBook | null
+  takerFee: number | undefined
 }
 
 async function getFutureExchangeInfo(): Promise<FutureExchangeInfo[]> {
@@ -76,10 +92,11 @@ async function getFutureExchangeInfo(): Promise<FutureExchangeInfo[]> {
 
   await Promise.all(exchanges.map(async (exchange) => (new Promise<void>(async (resolve) => {
     try {
-      exchange.markets = await exchange.loadMarkets(true)
-      for (let symbol in exchange.markets) {
-        const market = exchange.markets[symbol];
-        const base = ["ETH", "WETH"]
+      const markets = await exchange.loadMarkets(true)
+      for (let symbol in markets) {
+        const market = markets[symbol];
+        
+        const base = ["ETH"]
         const quote = ["USD", "USDT", "USDC"]
 
         // Filter out all perpetual contracts between ETH and USD
@@ -88,8 +105,9 @@ async function getFutureExchangeInfo(): Promise<FutureExchangeInfo[]> {
           let bidMinPrice = Number.MAX_VALUE, bidDepth = 0, askMaxPrice = Number.MIN_VALUE, askDepth = 0, fundingRate = null
 
           promises.push(new Promise(async (resolve) => {
+            let orderBook = null
             try {
-              const orderBook = await exchange.fetchOrderBook(symbol)
+              orderBook = await exchange.fetchOrderBook(symbol)
               
             
               if(orderBook.bids && orderBook.bids.length > 0 && orderBook.asks && orderBook.asks.length > 0) {
@@ -118,17 +136,14 @@ async function getFutureExchangeInfo(): Promise<FutureExchangeInfo[]> {
               fundingRate = NaN
             }
 
-            console.log(symbol, '(' + exchange.name + ')')
-            console.log(' - Bid min price: ', bidMinPrice, 'Units:', bidDepth)
-            console.log(' - Ask max price: ', askMaxPrice, 'Units:', askDepth)
-            console.log(' - Funding rate: ', fundingRate)
-
             resolve({
               exchange: exchange.name,
               symbol,
               bidDepth,
               askDepth,
-              fundingRate
+              fundingRate,
+              orderBook,
+              takerFee: market.taker
             })
           }))
 
@@ -141,6 +156,47 @@ async function getFutureExchangeInfo(): Promise<FutureExchangeInfo[]> {
   }))))
 
   return Promise.all(promises)
+}
+
+// PART 5: Create logic to decide where to deploy collateral to optimize for: order execution [fees, orderbook impact, funding rate, other]
+function getOptimalExchange(amount: number, direction: 'short' | 'long', hodlDaysForecast: number, exchangeInfo: FutureExchangeInfo[]): {price: number, pair: FutureExchangeInfo} {
+  return exchangeInfo.map(pair => { 
+      // calculate the filled price ofthe amount in USD from the orderbook
+      let price = Number.MAX_VALUE
+      const filledPrice = pair.orderBook!.asks.reduce(([price, paid], ask) => {
+        if (paid < amount) {
+          if(ask[1]>amount-paid) {
+            return [price + (amount-paid) * ask[0], amount]
+          } else {
+            return [price + ask[1] * ask[0], paid + ask[1]]
+          }
+        } else {
+          return [price, paid]
+        }
+      }, [0, 0])
+      
+      if(filledPrice[1] < amount) {
+        console.log('Not enough liquidity for', amount, 'ETH ->', pair.symbol, '(' + pair.exchange + ')')
+      } else {
+        price = filledPrice[0]
+      }
+
+      // add fees
+      if (pair.takerFee === undefined || Number.isNaN(pair.takerFee)) {
+        console.log('Taker fee not defined for', pair.symbol, '(' + pair.exchange + ')')
+      } else {
+        price *= 1 + hodlDaysForecast * 3 *( direction==='long'? pair.takerFee : -pair.takerFee)
+      }
+
+      // add funding rate for the next 8 hours
+      if (pair.fundingRate === undefined || Number.isNaN(pair.fundingRate)) {
+        console.log('Funding rate not available for', pair.symbol, '(' + pair.exchange + ') -> assuming 0')
+      } else {
+        price *= 1 + pair.fundingRate
+      } 
+
+      return {price, pair}
+  }).sort((a, b) => a.price - b.price)[0]
 }
 
 main().catch(e => {
